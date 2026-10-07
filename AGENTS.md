@@ -14,9 +14,11 @@ for cross-session continuity.
   connecting that hook session id to MCP requests) must pass `workspace` and
   `project` together on every project-scoped call, including requests about "this
   project", "here", or "our work". Read the exact names from the nearest
-  `.ai-memory.toml` when it declares both. If it does not, obtain the names from
-  the operator or server configuration; never guess them from a directory name
-  and never rely on the server's last active project.
+  `.ai-memory.toml` when it declares both. Without a marker override, derive the
+  project from the normalized `upstream` remote, then `origin`, using the full
+  repository path without its host (`github.com/acme/api` → `acme-api`); use the
+  folder basename only when no valid remote exists. Never rely on the server's
+  last active project.
 
 This rule applies only to project-scoped calls. For cross-project retrieval,
 `global=true` must omit `workspace`, `project`, and `scopes`. For a standing
@@ -81,9 +83,9 @@ session start and reaches Claude Code only if the agent opens the file.
 
 If the rule is a standing *user/team* preference that should apply to
 every project (tech choices, code style, personal conventions), save it
-to ai-memory's reserved global scope instead — the durable-pages skill
-covers how. Default memory reads surface global-scope pages in every
-project automatically.
+to ai-memory's cross-project profile instead (`scope: "profile"`) — the
+durable-pages skill covers how. Every project receives the profile as
+defaults at session start, below its own rules file.
 
 ### Refreshing this snippet
 
@@ -197,6 +199,9 @@ evals/                     live A/B harness; workspace member, not shipped.
 companions/ai-memory-importer/  standalone OMC + external-conversation importer; NOT a root
                            workspace member — build/test it with
                            `--manifest-path companions/ai-memory-importer/Cargo.toml`.
+companions/ai-memory-macos/     Swift menu bar wrapper; NOT a root workspace member —
+                           `swift test --package-path companions/ai-memory-macos`
+                           and `./companions/ai-memory-macos/build.sh`.
 hooks/                     per-agent lifecycle hook bundles (shell/native).
 bin/                       host wrapper scripts (`ai-memory`, `deploy`, `release`).
 docker/                    Dockerfile, compose files, TLS proxy templates.
@@ -272,6 +277,10 @@ no tiers.
   `cargo test --manifest-path companions/ai-memory-importer/Cargo.toml`
   (plus fmt/clippy on the same manifest). Root `--workspace` commands do
   not cover it.
+- Run the macOS menu bar companion separately:
+  `swift test --package-path companions/ai-memory-macos`
+  (plus `./companions/ai-memory-macos/build.sh` to stage `AI Memory.app`).
+  Root `--workspace` commands do not cover it.
 
 ### Platform notes
 
@@ -303,7 +312,12 @@ no tiers.
   "$HOME\.rustup"`.
 
 - Shell-level checks: `tests/hooks/test_lib.sh`,
-  `tests/e2e/handoff_smoke.sh`, `scripts/check-native-packaging.sh`.
+  `tests/e2e/handoff_smoke.sh`, `scripts/check-native-packaging.sh`,
+  `scripts/check-nix-packaging.sh` (Nix flake output).
+- `.github/workflows/nix.yml`: path-filtered PRs always run `x86_64-linux`
+  (package + NixOS module eval / sandbox-parity). `aarch64-darwin` and the
+  privileged NixOS container smoke run on schedule, `workflow_dispatch`, or
+  a PR labelled `nix` / `full-ci`.
 - CI additionally runs `cargo build --release --bin ai-memory` on
   Linux/macOS, a Docker image smoke test, `cargo audit` (with the ignores
   listed in `ci.yml`), and differential gitleaks scanning.
@@ -315,8 +329,10 @@ no tiers.
   Linux — keeping it out of `ci.yml`
   is what holds PR feedback near the eight minutes the gating jobs take.
   **Add the `windows` label** to a PR touching path handling, file
-  locking, or git plumbing, so the check runs before the merge rather
-  than after it.
+  locking, git plumbing, or the hook bundle, so the corresponding Windows
+  jobs run before the merge rather than only on the nightly schedule. Both
+  the Rust test job and the hook-bundle job use this label gate on pull
+  requests; they also run on manual dispatch.
 
 ## Code style guidelines
 
@@ -440,16 +456,37 @@ Additional boundary rules:
   fails), and build `git2` signatures with a fixed `Signature::now(...)`,
   never `repo.signature()`. CI cannot catch either — its runners have no
   global gitconfig, so the breakage only ever shows up on a developer's box.
-- PRs touching scope resolution need table-driven tests for partial
-  scope, missing explicit scope, active-project precedence, and
-  cross-workspace isolation.
-- PRs touching permissions need tests for root, DB-user, and anonymous
-  behavior.
+- **Security-boundary tests are adversarial and mandatory.**
+  [`docs/security-boundaries.md`](docs/security-boundaries.md) is the inventory
+  of every isolation/security guard (per-project and workspace isolation, the
+  multi-user auth ladder, handoff single-claim + `any_owner` gate, pages-shared/
+  `author_id`-never-a-read-filter and supersession per invariant #16, the
+  active-project pointer, the sanitizer boundary, messaging scope, scope-
+  resolution fail-closed, destructive-op guards, hook backpressure, network
+  posture), each mapped to the test that would fail if the guard were removed.
+  Whenever you touch code in a boundary's "Enforcing code" column — or add a
+  new read/write/admin/hook/cross-scope entry point past one of these guards —
+  you MUST add or extend an **adversarial** test (attempt the violation, assert
+  refusal, include a legitimate control) and update that file's row in the same
+  change. Adding a new isolation dimension means a new row + its tests before
+  merge. A raw-id or unscoped/cross-project entry point (bare `session_id`/
+  `run_id`/`page_id`/message id, `global=true`, global `recent`, search) is
+  guilty until a test proves a foreign id/scope is refused. Prove the test
+  bites: it must fail with the guard removed and pass with it — a happy-path or
+  single-tenant test cannot see an isolation defect and does not count. These
+  guards live at integration level (`multi_session.rs`, `handoff_ownership.rs`,
+  `agent_messages.rs`, the active-project pointer tests, the MCP permission
+  suites); put boundary tests there. This subsumes the older "scope resolution"
+  and "permissions" test rules: PRs touching scope resolution still need
+  table-driven tests for partial scope, missing explicit scope, active-project
+  precedence, and cross-workspace isolation; PRs touching permissions still need
+  root, DB-user, and anonymous cases — now recorded against the inventory.
 - New disk+SQL mutations need recovery/rollback tests.
 - The recall-eval framework lives at
   `crates/ai-memory-consolidate/tests/recall_eval.rs`.
 - Tests run with `cargo t` locally and `cargo test --workspace --all-targets`
-  in CI.
+  in CI (plus `cargo test --workspace --doc`, which `--all-targets` excludes,
+  for doc-comment code blocks).
 
 ## Security considerations
 
@@ -507,8 +544,10 @@ Additional boundary rules:
   macOS/Windows legs run on a `full-ci` PR label, nightly (windows), or
   manual dispatch — and running them is **mandatory right before a
   release**: dispatch `ci` (macOS legs) and `windows` on the exact
-  release-candidate SHA and wait for green before tagging. Never tag a
-  release whose SHA lacks a green full matrix.
+  release-candidate SHA and wait for green before tagging. Nix follows the
+  same rule: Darwin nix build and the privileged NixOS container smoke need
+  `nix` / `full-ci`, schedule, or dispatch (not every `Cargo.lock` bump).
+  Never tag a release whose SHA lacks a green full matrix.
 - **Every release updates the Homebrew tap — do not forget it.** After
   `release.yml` publishes the GitHub release and its per-target tarballs,
   update `~/Projects/homebrew-tap/Formula/ai-memory.rb`: bump `version` and
@@ -519,6 +558,16 @@ Additional boundary rules:
   wrong hash makes `brew install` fail for everyone. This is a mandatory,
   recurring post-release step (it has been forgotten repeatedly); do not rely
   on a contributor PR to the tap to remember it.
+- **Reclaim build storage after every release — run `cargo clean`.** The
+  multi-worktree, multi-target-dir release flow (integration worktrees, per-agent
+  worktrees, separate `CARGO_TARGET_DIR`s) leaves many stale 100–180 MB test
+  binaries behind and has exhausted disk (see the `target/` bloat note under
+  Platform notes). Once a release is tagged and its artifacts are published, run
+  `cargo clean` (and `cargo clean` in each release worktree / extra target dir
+  you created, then remove finished `git worktree`s). This is a mandatory
+  post-release cleanup step, not optional housekeeping — treat it like the tap
+  bump above. During normal development, `cargo sweep --time 7` weekly is the
+  lighter-touch equivalent.
 - **No version bumps or release tags without explicit user approval.**
   Do not bump crate/package versions automatically.
 - **PR evaluation:** report pros, cons, and recommended fix, then ask for
@@ -552,8 +601,9 @@ Additional boundary rules:
 - [`docs/install.md`](docs/install.md) — installation cookbook for every
   supported agent client.
 - [`docs/cookbook.md`](docs/cookbook.md) — task-oriented cheat sheet: "I want
-  to do X" → how (recall, durable rules, importing a knowledge base, two agents
-  working together).
+  to do X" → how (recall, durable rules and must-read docs, importing a
+  knowledge base, retention, two agents working together, several accounts or
+  an external launcher via `run --env`, the Mac app, CLI, troubleshooting).
 - [`docs/comparison.md`](docs/comparison.md) — fair, user-facing comparison
   against other memory tools (camps, migration notes, how the field validates
   the file-first/pages-over-facts approach). Analysis behind it:
@@ -574,3 +624,8 @@ Additional boundary rules:
   agent-to-agent inbox/queue and the on-start hot-context notice.
 - [`docs/companion-crates.md`](docs/companion-crates.md) — boundary for
   optional companion projects (e.g. the importer).
+- [`docs/desktop/`](docs/desktop/) — research notes and phased plan for
+  GUI/desktop-app support (Claude Desktop, Codex desktop, Antigravity IDE,
+  ChatGPT/Grok desktop, Zed): verified per-app mechanics, capture/dedup
+  design, installer + CLI coexistence. Reconciles RFC #878; read before
+  any desktop-capture or tray/installer work.

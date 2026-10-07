@@ -29,13 +29,22 @@
   Bearer fails closed rather than falling back. Before human auth activates,
   deprecated Basic/cookie compatibility is evaluated for GET requests; after
   activation, Basic and unknown schemes do not suppress a valid web session.
-- `/mcp`, hooks, handoffs, and workstream routes are machine-only. A web-session
+- `/mcp`, `/identity`, hooks, handoffs, and workstream routes are machine-only. A web-session
   cookie cannot authenticate them.
 - A disallowed `Host` header receives `403 Forbidden` before auth evaluation
   (DNS-rebinding guard).
 
 The custom SPA shell and its static assets are public so the login screen can
-load. Its data routes remain protected. Start with:
+load. Its data routes remain protected. When `--web-ui-dir` is **absent**, the
+builtin wiki exposes public `GET {web_slug}/login` and
+`GET {web_slug}/change-password` HTML pages that call the same `/auth/*`
+endpoints; navigational browser GETs to protected wiki routes redirect there
+instead of returning bare JSON 401/403. `/api/v1` stays JSON either way.
+The builtin wiki also serves the root-only `GET {web_slug}/pending` page. It
+lists pending auto-improvement proposals and posts approve and reject to the
+existing `/admin/pending-writes/*` routes. A signed-in non-root user gets a
+403 page, not the change-password redirect. Start
+with:
 
 ```http
 GET /auth/me
@@ -59,6 +68,18 @@ deprecated GET-only browser compatibility may accept the root bearer through
 HTTP Basic and an HttpOnly `ai_memory_auth` cookie. Human activation disables
 that path immediately. See [`docs/users.md`](users.md) for bootstrap, password
 rotation, recovery, roles, session expiry, and API-key lifecycle.
+
+Machine clients can call `GET /identity` with their bearer key, even when the
+web UI is disabled. It reports only the authenticated caller and server version:
+
+```json
+{"version":"2.5.2","level":"user","operator":"user:alice","distinguishes_operators":true}
+```
+
+`level` is `root`, `user` or `anonymous`; `operator` is the qualified identity
+key, or `null` on an unauthenticated single-user server. Web-session cookies
+cannot authenticate this route. Its response uses `Cache-Control: private,
+no-store`. See [users.md](users.md) for machine keys and identity types.
 
 ## 3. Error model
 
@@ -89,19 +110,17 @@ All endpoints are `GET` unless noted. Paths under `/api/v1/`.
 GET /api/v1/workspaces
 ```
 
-**Response:** `{ "workspaces": [WorkspaceSummary, …] }`
+**Response:** a bare JSON array, `[WorkspaceSummary, …]`
 
 ```json
-{
-  "workspaces": [
-    {
-      "workspace_name": "default",
-      "project_count": 3,
-      "page_count": 412,
-      "last_updated": "2026-05-28T14:02:11.123Z"
-    }
-  ]
-}
+[
+  {
+    "workspace_name": "default",
+    "project_count": 3,
+    "page_count": 412,
+    "last_updated": "2026-05-28T14:02:11.123Z"
+  }
+]
 ```
 
 `last_updated` is `null` for an empty workspace.
@@ -113,19 +132,17 @@ GET /api/v1/projects                  # all projects across all workspaces
 GET /api/v1/projects?workspace=NAME   # projects in one workspace
 ```
 
-**Response:** `{ "projects": [ProjectSummary, …] }`
+**Response:** a bare JSON array, `[ProjectSummary, …]`
 
 ```json
-{
-  "projects": [
-    {
-      "workspace_name": "default",
-      "project_name": "ai-memory",
-      "page_count": 138,
-      "last_updated": "2026-05-28T14:02:11.123Z"
-    }
-  ]
-}
+[
+  {
+    "workspace_name": "default",
+    "project_name": "ai-memory",
+    "page_count": 138,
+    "last_updated": "2026-05-28T14:02:11.123Z"
+  }
+]
 ```
 
 ### 4.3 Pages (list)
@@ -134,20 +151,18 @@ GET /api/v1/projects?workspace=NAME   # projects in one workspace
 GET /api/v1/workspaces/{workspace}/projects/{project}/pages
 ```
 
-**Response:** `{ "pages": [PageSummary, …] }`
+**Response:** a bare JSON array, `[PageSummary, …]`
 
 ```json
-{
-  "pages": [
-    {
-      "path": "decisions/0007-db.md",
-      "title": "Standardised on Postgres",
-      "kind": "decision",
-      "tier": "semantic",
-      "updated_at": "2026-05-27T09:12:00.000Z"
-    }
-  ]
-}
+[
+  {
+    "path": "decisions/0007-db.md",
+    "title": "Standardised on Postgres",
+    "kind": "decision",
+    "tier": "semantic",
+    "updated_at": "2026-05-27T09:12:00.000Z"
+  }
+]
 ```
 
 `404` if the workspace or project doesn't exist.
@@ -176,7 +191,7 @@ links + back-links.
   "updated_at": "2026-05-28T11:04:33.123Z",
   "supersedes": null,
   "frontmatter": { "tags": ["adr"], "pinned": true },
-  "body": "# Standardised on Postgres\n\n…",
+  "body_markdown": "# Standardised on Postgres\n\n…",
   "links":     [ { "path": "concepts/db-rules.md", "title": "DB rules", "kind": "rule" } ],
   "backlinks": [ { "path": "sessions/2026-05-27.md", "title": "Session 2026-05-27", "kind": "session" } ]
 }
@@ -209,20 +224,20 @@ Content-Type: application/json
 }
 ```
 
-**Response:** `{ "hits": [PageHit, …] }`
+**Response:** a bare JSON array, `[SearchHit, …]`
 
 ```json
-{
-  "hits": [
-    {
-      "id": "01928d27-…",
-      "path": "concepts/karpathy-wiki.md",
-      "title": "Karpathy LLM Wiki pattern",
-      "snippet": "Andrej <mark>Karpathy</mark>'s LLM wiki design …",
-      "rank": -8.4
-    }
-  ]
-}
+[
+  {
+    "workspace": "default",
+    "project": "ai-memory",
+    "path": "concepts/karpathy-wiki.md",
+    "title": "Karpathy LLM Wiki pattern",
+    "kind": "concept",
+    "snippet": "Andrej <mark>Karpathy</mark>'s LLM wiki design …",
+    "rank": -8.4
+  }
+]
 ```
 
 Rules:
@@ -252,20 +267,42 @@ Every reader surface uses the same `kind` contract. An explicit frontmatter
 `rule`, `slot`, `session`, `decision`, `gotcha`, `concept`, `procedure`, and
 `note`, respectively. Other paths fall back to `fact`.
 
-**Response:** `{ "pages": [BriefingPage, …] }`
+**Legacy response:** a bare JSON array of `PageSummary` objects.
 
 ```json
-{
-  "pages": [
-    {
-      "path": "sessions/2026-05-28.md",
-      "title": "Session 2026-05-28",
-      "kind": "session",
-      "updated_at": "2026-05-28T14:02:11.123Z"
-    }
-  ]
-}
+[
+  {
+    "path": "sessions/2026-05-28.md",
+    "title": "Session 2026-05-28",
+    "kind": "session",
+    "updated_at": "2026-05-28T14:02:11.123Z"
+  }
+]
 ```
+
+Supply `updated_since` (RFC 3339) or `cursor` to opt into incremental paging:
+
+```http
+GET /api/v1/workspaces/{workspace}/projects/{project}/recent?updated_since=2026-09-30T00%3A00%3A00Z&limit=20
+```
+
+```json
+{"pages": [], "next_cursor": null}
+```
+
+The cutoff is exclusive (`updated_at > updated_since`). Results are ordered
+by `(updated_at, path)` ascending and fetched with a bounded SQL query. Pass
+`next_cursor` unchanged to continue; an optional cutoff must match the cursor's
+cutoff. Cursors use versioned URL-safe base64 without padding, are opaque to
+clients, and are limited to 8192 characters (6144 decoded bytes). They are bound
+to the workspace and project. Invalid, foreign-scope or conflicting cursors
+return 400. Each request rechecks authorization and uses
+`Cache-Control: private, no-store`.
+
+Incremental results omit superseded and expired pages, including expired pinned
+pages. They provide no snapshot or deletion feed: concurrent changes can appear
+on a later page, and deleted or expired pages are absent. Calls without either
+parameter retain the legacy array, descending order and cache behavior.
 
 ### 4.7 Briefing (structured snapshot)
 
@@ -475,11 +512,18 @@ an unnamed caller sees unattributed ones only. Never cached (`no-store`).
       "started_at": "2026-08-16T09:12:03.412Z",
       "ended_at": "2026-08-16T10:47:55.001Z",
       "observation_count": 143,
-      "actor_user": null
+      "actor_user": null,
+      "consolidation": {"state": "completed", "attempts": 1}
     }
   ]
 }
 ```
+
+`consolidation` is `null` when no job exists for that session in the requested
+project. Otherwise it contains the latest generation's state (`pending`,
+`running`, `completed`, `failed` or `superseded`) and attempt count. Jobs are
+selected in the same scope and query as the owner-filtered sessions; provider
+errors are omitted. This reports the job state, not every page's freshness.
 
 ### 4.12 Session observations
 
@@ -515,7 +559,8 @@ historical text. Never cached (`no-store`). Same payload as the MCP tool
     "started_at": "2026-08-16T09:12:03.412Z",
     "ended_at": "2026-08-16T10:47:55.001Z",
     "observation_count": 143,
-    "actor_user": null
+    "actor_user": null,
+    "consolidation": null
   },
   "observations": [
     {
@@ -560,6 +605,18 @@ historical text. Never cached (`no-store`). Same payload as the MCP tool
   request body affects the result.
 
 ## 6. Custom UI hosting and base paths
+
+For an API-only companion, mount the protected JSON surface without a browser
+UI:
+
+```bash
+ai-memory serve --transport http --enable-api
+```
+
+`--enable-web` continues to imply `/api/v1` for compatibility. `--enable-api`
+alone does not mount `/web`, its login pages, static assets, or the unauthenticated
+favicon route. The API uses the same machine Bearer or browser-session auth gate
+in either mode.
 
 ```bash
 ai-memory serve \

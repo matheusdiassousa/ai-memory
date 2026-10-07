@@ -44,8 +44,9 @@ The set is deliberately closed: a free-text relation column turns into
 an unqueryable folksonomy. Keys outside the vocabulary are skipped at
 the write boundary (with a warning) — a typo cannot mint a new edge
 kind. Targets use the same grammar as wikilinks: `path`,
-`project:path`, or `workspace/project:path`; extension-less targets
-gain `.md`.
+`project:path`, `workspace/project:path`, or `_global:path` (the
+reserved preferences project in the default workspace); extension-less
+targets gain `.md`.
 
 ## What typed edges do
 
@@ -66,7 +67,8 @@ gain `.md`.
 ## Who writes them
 
 - **You**, in any page's frontmatter (the wiki files are plain
-  markdown — edit and `reindex`, or let the watcher pick it up).
+  markdown — edit them and let the watcher reindex the page; `ai-memory
+  reindex` only rebuilds a clean store from the markdown).
 - **The consolidator**, sparingly: both single-page consolidation and
   `memory_consolidate` with `multi_page=true` can preserve a relation
   when the session's evidence states it plainly (a fix

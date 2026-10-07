@@ -78,7 +78,14 @@ what the project is and is not designed to defend against.
   `(workspace_id, project_id)`. A purge operation for project A cannot
   delete files that also belong to project B. Entity lookup filters at the
   project CTE and page boundaries; V38 triggers reject mismatched
-  workspace/project entities and cross-project entity/page links.
+  workspace/project entities and cross-project entity/page links. The wiki
+  directory is imported, operator-editable content and is therefore treated as
+  untrusted: symbolic links and filesystem reparse points at the wiki root,
+  workspace/project roots, or any descendant are refused for page reads,
+  writes, indexing, recovery, and lifecycle cleanup. These component checks
+  protect against links already present when an operation runs; they do not
+  claim descriptor-relative protection against a concurrently malicious process
+  running as the same operating-system user.
 
 - **Entity text remains bounded local data.** Consolidator output and
   hand-edited `entities:` frontmatter cross the same normalization boundary:
@@ -101,6 +108,9 @@ what the project is and is not designed to defend against.
     `[REDACTED]`.
   - Captured assistant text flows into the consolidation and reviewer prompts,
     and — if you configure a cloud LLM provider — is sent to that provider.
+    The latest excerpt of a session also rides in its automatic handoff, so
+    the next session that claims the baton receives it as startup context. It
+    is not rendered into the git-tracked session page.
   - The opt-in is **global** to the install: there is no per-project marker to
     exclude a sensitive repository once the flag is on (assistant text is not
     path-attributable). Turn the server flag off to disable it everywhere.
